@@ -7,8 +7,7 @@
 #
 
 ## setup
-# tmpdir
-$usrtmpdir = "";		# specify if any
+$tmpdir = ".";
 
 # mkfa executable location
 ($thisdir) = ($0 =~ /(.*(\/|\\))[^\/\\]*$/o);
@@ -16,21 +15,6 @@ $mkfabin = "${thisdir}mkfa";
 
 # dfa_minimize executable location
 $minimizebin = "${thisdir}dfa_minimize";
-# find tmpdir
-@tmpdirs = ($usrtmpdir, $ENV{"TMP"}, $ENV{"TEMP"}, "/tmp", "/var/tmp", "/WINDOWS/Temp", "/WINNT/Temp");
-
-$tmpdir="";
-while (@tmpdirs) {
-    $t = shift(@tmpdirs);
-    next if ($t eq "");
-    if (-d "$t" && -w "$t") {
-	$tmpdir = $t;
-	last;
-    }
-}
-if ($tmpdir eq "") {
-    die "Please set working directory in \$usrtmpdir at $0\n";
-}
 
 #############################################################
 
@@ -59,11 +43,40 @@ if ($gramprefix eq "") {
 $gramfile = "$ARGV[$#ARGV].grammar";
 $vocafile = "$ARGV[$#ARGV].voca";
 $dfafile  = "$ARGV[$#ARGV].dfa";
+$fdfafile  = "$ARGV[$#ARGV].dfa.forward";
 $dictfile = "$ARGV[$#ARGV].dict";
 $termfile = "$ARGV[$#ARGV].term";
-$tmpprefix = "$tmpdir/g$$";
+$tmpprefix = "$tmpdir/tmp$$";
+$tmpgramfile = "${tmpprefix}.grammar";
 $tmpvocafile = "${tmpprefix}.voca";
-$rgramfile = "${tmpprefix}.grammar";
+$rgramfile = "${tmpprefix}-rev.grammar";
+$tmpheadfile = "${tmpprefix}.h";
+
+# check if input file exists
+
+if (! -f $gramfile) {
+    die "cannot open \"$gramfile\"";
+}
+if (! -f $vocafile) {
+    die "cannot open \"$vocafile\"";
+}
+
+# sanitize grammar file
+open(GRAM,"< $gramfile") || die "cannot open \"$gramfile\"";
+open(SGRAM,"> $tmpgramfile") || die "cannot open \"$tmpgramfile\"";
+while (<GRAM>) {
+    chomp;
+    $CRLF = 1 if /\r$/;
+    s/\r+$//g;
+    s/#.*//g;
+    if (/^[ \t]*$/) {
+	print SGRAM "\n";
+	next;
+    }
+    print SGRAM "$_\n";
+}
+close(SGRAM);
+close(GRAM);
 
 # generate reverse grammar file
 open(GRAM,"< $gramfile") || die "cannot open \"$gramfile\"";
@@ -74,7 +87,10 @@ while (<GRAM>) {
     $CRLF = 1 if /\r$/;
     s/\r+$//g;
     s/#.*//g;
-    if (/^[ \t]*$/) {next;}
+    if (/^[ \t]*$/) {
+	print RGRAM "\n";
+	next;
+    }
     ($left, $right) = split(/\:/);
     if ($CRLF == 1) {
 	print RGRAM $left, ': ', join(' ', reverse(split(/ /,$right))), "\r\n";
@@ -104,7 +120,10 @@ while (<VOCA>) {
     $CRLF = 1 if /\r$/;
     s/\r+$//g;
     s/#.*//g;
-    if (/^[ \t]*$/) {next;}
+    if (/^[ \t]*$/) {
+	print TMPVOCA "\n";
+	next;
+    }
     if (/^%[ \t]*([A-Za-z0-9_]*)/) {
 	if ($CRLF == 1) {
 	    printf(TMPVOCA "\#%s\r\n", $1);
@@ -130,33 +149,60 @@ if ($make_term == 1) {
     close(GTERM);
 }
 print "$vocafile    has $n1 categories and $n2 words\n";
-
 print "---\n";
 
 # call mkfa and make .dfa
+sub mkfa {
+    my ($gram, $voca, $dfa, $h) = @_;
+    my $status;
+    my $command;
+    if ($tmpprefix =~ /cygdrive/) {
+	$command = "$mkfabin -e1 -fg `cygpath -w $gram` -fv `cygpath -w $voca` -fo `cygpath -w $dfa` -fh `cygpath -w $h`";
+    } else {
+	$command = "$mkfabin -e1 -fg $gram -fv $voca -fo $dfa -fh $h";
+    }
+    print "executing [$command]\n";
+    $status = system("$command");
+    if ($status != 0) {
+	print STDERR "\n";
+	print STDERR "**** Error occured in mkfa ***\n";
+	print STDERR "*  Temporary files are left in $tmpdir for your debugging. You can delete them manually:\n";
+	print STDERR "*            grammar = $tmpgramfile\n";
+	print STDERR "*    reverse grammar = $rgramfile\n";
+	print STDERR "*     vocab category = $tmpvocafile\n";
+	print STDERR "*         header log = $tmpheadfile\n";
+	print STDERR "\n";
+    }
+    return $status;
+}
+
 if (! -x $minimizebin) {
     # no minimization
     print "Warning: dfa_minimize not found in the same place as mkdfa.pl\n";
     print "Warning: no minimization performed\n";
-    if ($tmpprefix =~ /cygdrive/) {
-	$status = system("$mkfabin -e1 -fg `cygpath -w $rgramfile` -fv `cygpath -w $tmpvocafile` -fo `cygpath -w $dfafile` -fh `cygpath -w ${tmpprefix}.h`");
-    } else {
-	$status = system("$mkfabin -e1 -fg $rgramfile -fv $tmpvocafile -fo $dfafile -fh ${tmpprefix}.h");
+    if (&mkfa($rgramfile, $tmpvocafile, $dfafile, $tmpheadfile) != 0) {
+	die "stopped";
+    }
+    if (&mkfa($tmpgramfile, $tmpvocafile, $fdfafile, $tmpheadfile) != 0) {
+	die "stopped";
     }
 } else {
     # minimize DFA after generation
-    if ($tmpprefix =~ /cygdrive/) {
-	$status = system("$mkfabin -e1 -fg `cygpath -w $rgramfile` -fv `cygpath -w $tmpvocafile` -fo `cygpath -w ${dfafile}.tmp` -fh `cygpath -w ${tmpprefix}.h`");
-	system("$minimizebin `cygpath -w ${dfafile}.tmp` -o `cygpath -w $dfafile`");
-    } else {
-	$status = system("$mkfabin -e1 -fg $rgramfile -fv $tmpvocafile -fo ${dfafile}.tmp -fh ${tmpprefix}.h");
-	system("$minimizebin ${dfafile}.tmp -o $dfafile");
+    if (&mkfa($rgramfile, $tmpvocafile, ${dfafile}.tmp, $tmpheadfile) != 0) {
+	die "stopped";
     }
+    system("$minimizebin `cygpath -w ${dfafile}.tmp` -o `cygpath -w $dfafile`");
+    if (&mkfa($tmpgramfile, $tmpvocafile, ${dfafile}.tmp, $tmpheadfile) != 0) {
+	die "stopped";
+    }
+    system("$minimizebin `cygpath -w ${dfafile}.tmp` -o `cygpath -w $fdfafile`");
     unlink("${dfafile}.tmp");
 }
+
+unlink("$tmpgramfile");
 unlink("$rgramfile");
 unlink("$tmpvocafile");
-unlink("${tmpprefix}.h");
+unlink("$tmpheadfile");
 print "---\n";
 if ($status != 0) {
     # error
@@ -199,6 +245,8 @@ if ($make_term == 1) {
 if ($make_dict == 1) {
     $gene .= " $dictfile";
 }
+$gene .= " $fdfafile";
+
 print "generated: $gene\n";
 
 sub usage {
